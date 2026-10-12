@@ -634,6 +634,43 @@ class TestMatchesScipy:
             lambda q, alpha, beta: st.cauchy.ppf(q, alpha, beta),
         )
 
+    @pytest.mark.skipif(
+        condition=(pytensor.config.floatX == "float32"),
+        reason="Tail values are not representable in float32",
+    )
+    def test_cauchy_studentt_logcdf_tails(self):
+        # Regression test for #8435: the lower tail used to drift and then
+        # return -inf because of cancellation
+        value = np.array([-1e20, -1e16, -1e15, -1e12, -1e8, -1e3, 1e3, 1e8])
+        npt.assert_allclose(
+            pm.logcdf(pm.Cauchy.dist(alpha=0.0, beta=1.0), value).eval(),
+            st.cauchy.logcdf(value),
+            rtol=1e-12,
+        )
+
+        value = np.array([-1e9, -1e8, -1e7, -1e3, -10.0, -1.0, 0.0, 1.0, 10.0, 1e3])
+        for nu in [0.5, 1.0, 2.0, 5.0, 30.0]:
+            npt.assert_allclose(
+                pm.logcdf(pm.StudentT.dist(nu=nu, mu=0.0, sigma=1.0), value).eval(),
+                st.t.logcdf(value, nu),
+                rtol=1e-12,
+                err_msg=f"nu={nu}",
+            )
+
+        # The gradient stays finite on both sides of the switch between formulas
+        value = pt.scalar("value")
+        nu = pt.scalar("nu")
+        logcdf = pm.logcdf(pm.StudentT.dist(nu=nu, mu=0.0, sigma=1.0), value)
+        dlogcdf = pytensor.function([value, nu], pt.grad(logcdf, value))
+        for nu_ in [1.0, 4.0]:
+            for value_ in [-1e6, -3.0, -np.sqrt(nu_), -1e-8, 0.0, 1e-8, 3.0]:
+                npt.assert_allclose(
+                    dlogcdf(value_, nu_),
+                    np.exp(st.t.logpdf(value_, nu_) - st.t.logcdf(value_, nu_)),
+                    rtol=1e-7,
+                    err_msg=f"nu={nu_}, value={value_}",
+                )
+
     def test_half_cauchy(self):
         check_logp(
             pm.HalfCauchy,

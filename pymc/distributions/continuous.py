@@ -1954,10 +1954,25 @@ class StudentT(Continuous):
         _, sigma = get_tau_sigma(sigma=sigma)
 
         t = (value - mu) / sigma
-        sqrt_t2_nu = pt.sqrt(t**2 + nu)
-        x = (t + sqrt_t2_nu) / (2.0 * sqrt_t2_nu)
+        # In the tails (t**2 > nu), t + sqrt(t**2 + nu) below cancels for
+        # negative t and the CDF rounds to 1 for positive t. There, use
+        # P(T <= -|t|) = I_y(nu / 2, 1 / 2) / 2 with y = nu / (nu + t**2) < 1 / 2.
+        # Each branch gets a placeholder value where it is not used, so that
+        # neither it nor its gradient can become nan.
+        in_tails = pt.gt(t**2, nu)
+        y = pt.switch(in_tails, nu / (nu + t**2), 0.25)
+        # A plain 0.5 would become a float32 constant and cost precision in
+        # the gradient, so give it the dtype of nu / 2.
+        half_nu = nu / 2.0
+        tail = 0.5 * pt.betainc(half_nu, pt.constant(0.5, dtype=half_nu.dtype), y)
+        tails_res = pt.switch(pt.lt(t, 0), pt.log(tail), pt.log1p(-tail))
 
-        res = pt.log(pt.betainc(nu / 2.0, nu / 2.0, x))
+        t_center = pt.switch(in_tails, 0.0, t)
+        sqrt_t2_nu = pt.sqrt(t_center**2 + nu)
+        x = (t_center + sqrt_t2_nu) / (2.0 * sqrt_t2_nu)
+        center_res = pt.log(pt.betainc(nu / 2.0, nu / 2.0, x))
+
+        res = pt.switch(in_tails, tails_res, center_res)
 
         return check_parameters(
             res,
@@ -2293,7 +2308,15 @@ class Cauchy(Continuous):
         )
 
     def logcdf(value, alpha, beta):
-        res = pt.log(0.5 + pt.arctan((value - alpha) / beta) / np.pi)
+        z = (value - alpha) / beta
+        # 0.5 + arctan(z) / pi cancels in the lower tail. For z < 0 it equals
+        # arctan2(1, -z) / pi and for z >= 0 it equals 1 - arctan2(1, z) / pi,
+        # neither of which loses precision; both are smooth for all z.
+        res = pt.switch(
+            pt.lt(z, 0),
+            pt.log(pt.arctan2(1.0, -z)) - np.log(np.pi),
+            pt.log1p(-pt.arctan2(1.0, z) / np.pi),
+        )
         return check_parameters(
             res,
             beta > 0,
